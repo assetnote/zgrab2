@@ -32,3 +32,5 @@ require (
 	github.com/zmap/rc2 v0.0.0-20190804163417-abaa70531248 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
+
+replace github.com/zmap/zgrab2 => github.com/assetnote/zgrab2 v0.0.0-20240826202101-82b0038c0494
