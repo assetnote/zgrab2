@@ -13,12 +13,10 @@ import (
 // Flags holds the command-line configuration for the Shadowsocks scan module.
 type Flags struct {
 	zgrab2.BaseFlags
-	Timeout time.Duration `long:"timeout" default:"10s" description:"Timeout for connection"`
 }
 
 // Module implements the zgrab2.Module interface
-type Module struct {
-}
+type Module struct{}
 
 // Scanner implements the zgrab2.Scanner interface
 type Scanner struct {
@@ -115,7 +113,6 @@ func (s *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, interface{}
 	// Try to read response
 	response := make([]byte, 1024)
 	n, err := conn.Read(response)
-
 	if err != nil {
 		// this could be very prone to false positives
 		if err == io.EOF || errors.Is(err, net.Error(nil)) {
