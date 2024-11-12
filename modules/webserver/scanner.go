@@ -90,22 +90,76 @@ type Results struct {
 	ProxySignature ProxySignature `json:"proxy_signature,omitempty"`
 }
 
-// HeaderSignature defines which header and pattern to look for
+type MatchType string
+
+const (
+	MatchContains MatchType = "contains" // Check if value contains pattern
+	MatchExists   MatchType = "exists"   // Check if header exists (ignore value)
+	MatchExact    MatchType = "exact"    // Exact string match
+)
+
+type HeaderMatch struct {
+	Pattern   string    // Pattern to match against (ignored for MatchExists)
+	MatchType MatchType // Type of match to perform
+}
+
 type HeaderSignature struct {
-	HeaderName string     // e.g., "Server", "Proxy-Agent", "X-Powered-By"
-	Pattern    string     // substring to match in header value
-	ServerType ServerType // server type to return if matched
+	RequiredHeaders map[string]HeaderMatch
+	ServerType      ServerType
 }
 
 var headerSignatures = []HeaderSignature{
-	{HeaderName: "Server", Pattern: "apache/", ServerType: ServerApache},
-	{HeaderName: "Server", Pattern: "nginx", ServerType: ServerNginx},
-	{HeaderName: "Server", Pattern: "haproxy/", ServerType: ServerHAProxy},
-	{HeaderName: "Server", Pattern: "squid/", ServerType: ServerSquid},
-	{HeaderName: "Server", Pattern: "cloudflare", ServerType: ServerCloudflare},
-	{HeaderName: "Proxy-Agent", Pattern: "privoxy", ServerType: ServerPrivoxy},
-	// Add more signatures as needed
-	// {HeaderName: "X-Powered-By", Pattern: "Express", ServerType: ServerExpress},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Server": {Pattern: "apache/", MatchType: MatchContains},
+		},
+		ServerType: ServerApache,
+	},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Server": {Pattern: "nginx", MatchType: MatchContains},
+		},
+		ServerType: ServerNginx,
+	},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Server": {Pattern: "haproxy/", MatchType: MatchContains},
+		},
+		ServerType: ServerHAProxy,
+	},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Server": {Pattern: "squid/", MatchType: MatchContains},
+		},
+		ServerType: ServerSquid,
+	},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Server": {Pattern: "cloudflare", MatchType: MatchContains},
+		},
+		ServerType: ServerCloudflare,
+	},
+	{
+		RequiredHeaders: map[string]HeaderMatch{
+			"Proxy-Agent": {Pattern: "privoxy", MatchType: MatchContains},
+		},
+		ServerType: ServerPrivoxy,
+	},
+}
+
+func headerMatches(headers http.Header, headerName string, match HeaderMatch) bool {
+	headerValue := headers.Get(headerName)
+
+	switch match.MatchType {
+	case MatchExists:
+		return headerValue != ""
+	case MatchContains:
+		return headerValue != "" && strings.Contains(strings.ToLower(headerValue), match.Pattern)
+	case MatchExact:
+		return headerValue == match.Pattern
+	default:
+		return false
+	}
 }
 
 // RegisterModule registers the zgrab2 module
@@ -198,23 +252,35 @@ func parseVersion(versionStr string) *ServerVersion {
 
 func identifyServerFromHeaders(headers http.Header) (ServerType, string, ProxySignature) {
 	for _, sig := range headerSignatures {
-		headerValue := headers.Get(sig.HeaderName)
-		if headerValue == "" || !strings.Contains(strings.ToLower(headerValue), sig.Pattern) {
+		allHeadersMatch := true
+		var primaryValue string
+
+		for headerName, match := range sig.RequiredHeaders {
+			if !headerMatches(headers, headerName, match) {
+				allHeadersMatch = false
+				break
+			}
+			if primaryValue == "" {
+				primaryValue = headers.Get(headerName)
+			}
+		}
+
+		if !allHeadersMatch {
 			continue
 		}
 
-		version := parseVersion(headerValue)
+		version := parseVersion(primaryValue)
 		configs, exists := ServerProxySignatures[sig.ServerType]
 		if version != nil && exists {
 			for _, config := range configs {
 				if version.isLessThanOrEqual(config.VulnerableVersion) {
 					config.IsMatch = true
-					return sig.ServerType, headerValue, config
+					return sig.ServerType, primaryValue, config
 				}
 			}
 		}
 
-		return sig.ServerType, headerValue, ProxySignature{}
+		return sig.ServerType, primaryValue, ProxySignature{}
 	}
 
 	return ServerUnknown, "", ProxySignature{}
