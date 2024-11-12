@@ -49,7 +49,7 @@ type Flags struct {
 	Method          string `long:"method" default:"GET" description:"Set HTTP request method type"`
 	Endpoint        string `long:"endpoint" default:"/" description:"Send an HTTP request to an endpoint"`
 	FailHTTPToHTTPS bool   `long:"fail-http-to-https" description:"Trigger retry-https logic on known HTTP/400 protocol mismatch responses"`
-	UserAgent       string `long:"user-agent" default:"Mozilla/5.0 zgrab/0.x" description:"Set a custom user agent"`
+	UserAgent       string `long:"user-agent" default:"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" description:"Set a custom user agent"`
 	RetryHTTPS      bool   `long:"retry-https" description:"If the initial request fails, reconnect and try with HTTPS."`
 	MaxSize         int    `long:"max-size" default:"256" description:"Max kilobytes to read in response to an HTTP request"`
 	MaxRedirects    int    `long:"max-redirects" default:"0" description:"Max number of redirects to follow"`
@@ -98,8 +98,7 @@ type Results struct {
 }
 
 // Module is an implementation of the zgrab2.Module interface.
-type Module struct {
-}
+type Module struct{}
 
 // Scanner is the implementation of the zgrab2.Scanner interface.
 type Scanner struct {
@@ -436,14 +435,14 @@ func getHTTPURL(https bool, host string, port uint16, endpoint string) string {
 		proto = "http"
 	}
 	if protoToPort[proto] == port && strings.Contains(host, ":") {
-		//If the host has a ":" in it, assume literal IPv6 address
+		// If the host has a ":" in it, assume literal IPv6 address
 		return proto + "://[" + host + "]" + endpoint
 	} else if protoToPort[proto] == port {
-		//Otherwise, just concatenate host and endpoint
+		// Otherwise, just concatenate host and endpoint
 		return proto + "://" + host + endpoint
 	}
 
-	//For non-default ports, net.JoinHostPort will handle brackets for IPv6 literals
+	// For non-default ports, net.JoinHostPort will handle brackets for IPv6 literals
 	return proto + "://" + net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)) + endpoint
 }
 

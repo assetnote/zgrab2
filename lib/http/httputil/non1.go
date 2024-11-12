@@ -135,7 +135,6 @@ func TestReverseProxy(t *testing.T) {
 	if res.StatusCode != http.StatusBadGateway {
 		t.Errorf("request to bad proxy = %v; want 502 StatusBadGateway", res.Status)
 	}
-
 }
 
 // Issue 16875: remove any proxied headers mentioned in the "Connection"
@@ -411,7 +410,7 @@ func TestUserAgentHeader(t *testing.T) {
 	const explicitUA = "explicit UA"
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/noua" {
-			if c := r.Header.Get("User-Agent"); c != "Mozilla/5.0 zgrab/0.x" {
+			if c := r.Header.Get("User-Agent"); c != "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" {
 				t.Errorf("handler got unexpected User-Agent header %q", c)
 			}
 			return
@@ -514,7 +513,7 @@ func TestReverseProxyGetPutBuffer(t *testing.T) {
 func TestReverseProxy_Post(t *testing.T) {
 	const backendResponse = "I am the backend"
 	const backendStatus = 200
-	var requestBody = bytes.Repeat([]byte("a"), 1<<20)
+	requestBody := bytes.Repeat([]byte("a"), 1<<20)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slurp, err := ioutil.ReadAll(r.Body)
 		if err != nil {

@@ -67,7 +67,7 @@ type scan struct {
 // TODO: Tag relevant results and exlain in comments
 // ScanResults instances are returned by the module's Scan function.
 type ScanResults struct {
-	//TODO: ?Include the request sent as well??
+	// TODO: ?Include the request sent as well??
 	Response     *http.Response `json:"response,omitempty" zgrab:"debug"`
 	CUPSResponse *http.Response `json:"cups_response,omitempty" zgrab:"debug"`
 
@@ -95,10 +95,10 @@ type Flags struct {
 	zgrab2.TLSFlags
 	Verbose bool `long:"verbose" description:"More verbose logging, include debug fields in the scan results"`
 
-	//FIXME: Borrowed from http module, determine whether this is all needed
+	// FIXME: Borrowed from http module, determine whether this is all needed
 	MaxSize      int    `long:"max-size" default:"256" description:"Max kilobytes to read in response to an IPP request"`
 	MaxRedirects int    `long:"max-redirects" default:"0" description:"Max number of redirects to follow"`
-	UserAgent    string `long:"user-agent" default:"Mozilla/5.0 zgrab/0.x" description:"Set a custom user agent"`
+	UserAgent    string `long:"user-agent" default:"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" description:"Set a custom user agent"`
 	TLSRetry     bool   `long:"ipps-retry" description:"If the initial request using TLS fails, reconnect and try using plaintext IPP."`
 
 	// FollowLocalhostRedirects overrides the default behavior to return
@@ -158,7 +158,7 @@ func (flags *Flags) Validate(args []string) error {
 
 // Help returns the module's help string.
 func (flags *Flags) Help() string {
-	//TODO: Write a help string
+	// TODO: Write a help string
 	return ""
 }
 
@@ -448,7 +448,7 @@ func versionNotSupported(body string) bool {
 func (scanner *Scanner) augmentWithCUPSData(scan *scan, target *zgrab2.ScanTarget, version *version) *zgrab2.ScanError {
 	cupsBody := getPrintersRequest(version.Major, version.Minor)
 	cupsResp, err := sendIPPRequest(scan, cupsBody)
-	//Store response regardless of error in request, because we may have gotten something back
+	// Store response regardless of error in request, because we may have gotten something back
 	scan.results.CUPSResponse = cupsResp
 	if err != nil {
 		return err
@@ -534,7 +534,7 @@ func (scanner *Scanner) Grab(scan *scan, target *zgrab2.ScanTarget, version *ver
 	body := getPrinterAttributesRequest(version.Major, version.Minor, scan.url, scan.tls)
 	// TODO: Log any weird errors coming out of this
 	resp, err := sendIPPRequest(scan, body)
-	//Store response regardless of error in request, because we may have gotten something back
+	// Store response regardless of error in request, because we may have gotten something back
 	scan.results.Response = resp
 	if err != nil {
 		return err
