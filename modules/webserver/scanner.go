@@ -90,6 +90,24 @@ type Results struct {
 	ProxySignature ProxySignature `json:"proxy_signature,omitempty"`
 }
 
+// HeaderSignature defines which header and pattern to look for
+type HeaderSignature struct {
+	HeaderName string     // e.g., "Server", "Proxy-Agent", "X-Powered-By"
+	Pattern    string     // substring to match in header value
+	ServerType ServerType // server type to return if matched
+}
+
+var headerSignatures = []HeaderSignature{
+	{HeaderName: "Server", Pattern: "apache/", ServerType: ServerApache},
+	{HeaderName: "Server", Pattern: "nginx", ServerType: ServerNginx},
+	{HeaderName: "Server", Pattern: "haproxy/", ServerType: ServerHAProxy},
+	{HeaderName: "Server", Pattern: "squid/", ServerType: ServerSquid},
+	{HeaderName: "Server", Pattern: "cloudflare", ServerType: ServerCloudflare},
+	{HeaderName: "Proxy-Agent", Pattern: "privoxy", ServerType: ServerPrivoxy},
+	// Add more signatures as needed
+	// {HeaderName: "X-Powered-By", Pattern: "Express", ServerType: ServerExpress},
+}
+
 // RegisterModule registers the zgrab2 module
 func RegisterModule() {
 	var module Module
@@ -178,61 +196,31 @@ func parseVersion(versionStr string) *ServerVersion {
 	return &ServerVersion{Major: major, Minor: minor, Patch: patch}
 }
 
-func identifyServer(serverHeader string) (ServerType, string, ProxySignature) {
-	if serverHeader == "" {
-		return ServerUnknown, "", ProxySignature{}
-	}
-
-	headerLower := strings.ToLower(serverHeader)
-	version := parseVersion(serverHeader)
-
-	serverTypes := map[string]ServerType{
-		"apache/":    ServerApache,
-		"nginx":      ServerNginx,
-		"haproxy/":   ServerHAProxy,
-		"squid/":     ServerSquid,
-		"cloudflare": ServerCloudflare,
-	}
-
-	for substr, serverType := range serverTypes {
-		if strings.Contains(headerLower, substr) {
-			if version != nil {
-				if configs, exists := ServerProxySignatures[serverType]; exists {
-					for _, config := range configs {
-						if version.isLessThanOrEqual(config.VulnerableVersion) {
-							config.IsMatch = true
-							return serverType, serverHeader, config
-						}
-					}
-				}
-			} else {
-				log.Warnf("failed to parse version from %s", serverHeader)
-			}
-			return serverType, serverHeader, ProxySignature{}
+func identifyServerFromHeaders(headers http.Header) (ServerType, string, ProxySignature) {
+	for _, sig := range headerSignatures {
+		headerValue := headers.Get(sig.HeaderName)
+		if headerValue == "" || !strings.Contains(strings.ToLower(headerValue), sig.Pattern) {
+			continue
 		}
-	}
 
-	return ServerUnknown, serverHeader, ProxySignature{}
-}
-
-func identifyProxyAgent(proxyAgent string) (ServerType, string, ProxySignature) {
-	if strings.Contains(strings.ToLower(proxyAgent), "privoxy") {
-		if version := parseVersion(proxyAgent); version != nil {
-			if configs, exists := ServerProxySignatures[ServerPrivoxy]; exists {
-				for _, config := range configs {
-					if version.isLessThanOrEqual(config.VulnerableVersion) {
-						config.IsMatch = true
-						return ServerPrivoxy, proxyAgent, config
-					}
+		version := parseVersion(headerValue)
+		configs, exists := ServerProxySignatures[sig.ServerType]
+		if version != nil && exists {
+			for _, config := range configs {
+				if version.isLessThanOrEqual(config.VulnerableVersion) {
+					config.IsMatch = true
+					return sig.ServerType, headerValue, config
 				}
 			}
 		}
-		return ServerPrivoxy, proxyAgent, ProxySignature{}
+
+		return sig.ServerType, headerValue, ProxySignature{}
 	}
+
 	return ServerUnknown, "", ProxySignature{}
 }
 
-// Scan performs the web server scan
+// Scan method simplified
 func (s *Scanner) Scan(t zgrab2.ScanTarget) (zgrab2.ScanStatus, interface{}, error) {
 	results := Results{
 		ServerType: ServerUnknown,
@@ -263,20 +251,9 @@ func (s *Scanner) Scan(t zgrab2.ScanTarget) (zgrab2.ScanStatus, interface{}, err
 	if httpResults != nil {
 		if resp, ok := httpResults.(*http_scanner.Results); ok && resp.Response != nil {
 			results.Response = resp.Response
-
-			serverHeader := resp.Response.Header.Get("Server")
-			results.ServerType, results.ServerValue, results.ProxySignature = identifyServer(serverHeader)
-
-			// no server header so check proxy agent
-			if serverHeader == "" {
-				proxyAgent := resp.Response.Header.Get("Proxy-Agent")
-				results.ServerType, results.ServerValue, results.ProxySignature = identifyProxyAgent(proxyAgent)
-			}
-
+			results.ServerType, results.ServerValue, results.ProxySignature = identifyServerFromHeaders(resp.Response.Header)
 			results.Proxy = results.ProxySignature.IsMatch
 
-			// Only return protocol error for unknown server type if we got a valid response
-			// and it wasn't a 400 Bad Request (which might indicate HTTPS required)
 			if results.ServerType == ServerUnknown && resp.Response.StatusCode != 400 {
 				return zgrab2.SCAN_PROTOCOL_ERROR, nil, zgrab2.NewScanError(zgrab2.SCAN_PROTOCOL_ERROR, nil)
 			}
