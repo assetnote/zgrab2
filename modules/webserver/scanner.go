@@ -72,13 +72,6 @@ var ServerProxySignatures = map[ServerType][]ProxySignature{
 			Details:           "mod_proxy enabled by default, vulnerable to SSRF",
 		},
 	},
-	ServerNginx: {
-		{
-			VulnerableVersion: &ServerVersion{1, 20, 1},
-			CVE:               "CVE-2021-23017",
-			Details:           "proxy_pass enabled by default",
-		},
-	},
 	ServerPrivoxy: {
 		{
 			VulnerableVersion: &ServerVersion{3, 0, 19},
