@@ -1,6 +1,7 @@
 package openproxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -66,24 +67,26 @@ func RegisterModule() {
 func (module *Module) NewFlags() interface{} {
 	return &Flags{
 		ProxyTests: []ProxyTest{
-			{"Nginx HTTP", 80, "http"},
-			{"Nginx HTTPS", 443, "https"},
-			{"Apache HTTP", 80, "http"},
-			{"Apache HTTPS", 443, "https"},
-			{"Squid", 3128, "http"},
-			{"Privoxy", 8118, "http"},
-			{"Shadowsocks", 8388, "socks5"},
-
-			//{"HAProxy HTTP", 8083, "http"}, hard to fingerprint (no distinctive header)
-			//{"HAProxy HTTPS", 443, "https"},
-			//{"V2Ray HTTP", 10086, "http"}, TODO: need to configure local server
-			//{"Dante SOCKS", 1080, "socks5"}, // TODO: need to configure local server
+			{Port: 80, Protocol: "http"},
+			{Port: 443, Protocol: "https"},
+			{Port: 3128, Protocol: "http"},
+			{Port: 8118, Protocol: "http"},
+			{Port: 8388, Protocol: "socks5"},
 		},
 		TestURLs: []string{
 			"http://example.com",
 			"https://example.com",
 		},
 	}
+}
+
+// serverTypes maps ports to potential server types that should be checked
+var serverTypes = map[int][]ProxyTest{
+	80:   {{Name: "Apache HTTP", Port: 80, Protocol: "http"}, {Name: "Nginx HTTP", Port: 80, Protocol: "http"}},
+	443:  {{Name: "Apache HTTPS", Port: 443, Protocol: "https"}, {Name: "Nginx HTTPS", Port: 443, Protocol: "https"}},
+	3128: {{Name: "Squid", Port: 3128, Protocol: "http"}},
+	8118: {{Name: "Privoxy", Port: 8118, Protocol: "http"}},
+	8388: {{Name: "Shadowsocks", Port: 8388, Protocol: "socks5"}},
 }
 
 // NewScanner provides a new scanner instance
@@ -135,18 +138,17 @@ func (scanner *Scanner) Init(flags zgrab2.ScanFlags) error {
 
 // validateProxyHeaders checks if response headers match expected proxy type
 func validateProxyHeaders(test ProxyTest, headers map[string][]string) bool {
+	server := headers["Server"]
+	if len(server) == 0 {
+		return false
+	}
+
 	switch test.Name {
 	case "Apache HTTP", "Apache HTTPS":
-		server := headers["Server"]
-		if len(server) > 0 {
-			return strings.HasPrefix(server[0], "Apache/")
-		}
+		return strings.HasPrefix(server[0], "Apache/")
 
 	case "Nginx HTTP", "Nginx HTTPS":
-		server := headers["Server"]
-		if len(server) > 0 {
-			return strings.HasPrefix(server[0], "nginx/")
-		}
+		return strings.HasPrefix(server[0], "nginx/")
 
 	case "Squid":
 		via := headers["Via"]
@@ -157,6 +159,7 @@ func validateProxyHeaders(test ProxyTest, headers map[string][]string) bool {
 		if len(xcache) > 0 && strings.Contains(xcache[0], "squid") {
 			return true
 		}
+		return false
 
 	case "HAProxy HTTP", "HAProxy HTTPS":
 		// HAProxy typically forwards original server headers
@@ -178,21 +181,13 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 	results := make(map[string]*Results)
 	targetHost := target.String()
 
-	// Create channel for results
 	resultsChan := make(chan struct {
 		name   string
 		result *Results
 	}, len(scanner.config.ProxyTests))
 
-	// Launch goroutine for each test
 	for _, test := range scanner.config.ProxyTests {
 		go func(test ProxyTest) {
-			result := &Results{
-				Name:        test.Name,
-				Protocol:    test.Protocol,
-				TestResults: make(map[string]*URLTestResult),
-			}
-
 			var client *http.Client
 			var err error
 
@@ -201,57 +196,60 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 				client, err = getHTTPClient(targetHost, test)
 			case "socks5":
 				client, err = getSOCKS5Client(targetHost, test)
-			default:
-				resultsChan <- struct {
-					name   string
-					result *Results
-				}{test.Name, result}
-				return
 			}
 
 			if err != nil {
-				result.IsOpen = false
-				resultsChan <- struct {
-					name   string
-					result *Results
-				}{test.Name, result}
+				for _, serverTest := range serverTypes[test.Port] {
+					result := &Results{
+						Name:        serverTest.Name,
+						Protocol:    serverTest.Protocol,
+						IsOpen:      false,
+						TestResults: make(map[string]*URLTestResult),
+					}
+					resultsChan <- struct {
+						name   string
+						result *Results
+					}{serverTest.Name, result}
+				}
 				return
 			}
 
-			// Test URLs concurrently too
-			urlChan := make(chan struct {
-				url    string
-				result *URLTestResult
-			}, len(scanner.config.TestURLs))
-
+			urlResults := make(map[string]*URLTestResult)
 			for _, testURL := range scanner.config.TestURLs {
-				go func(url string) {
-					urlResult := testSingleURL(client, url, test)
-					urlChan <- struct {
-						url    string
-						result *URLTestResult
-					}{url, urlResult}
-				}(testURL)
+				urlResults[testURL] = testSingleURL(client, testURL, test)
 			}
 
-			// Collect URL results
-			for i := 0; i < len(scanner.config.TestURLs); i++ {
-				urlRes := <-urlChan
-				result.TestResults[urlRes.url] = urlRes.result
-				if urlRes.result.Success {
-					result.IsOpen = true
+			for _, serverTest := range serverTypes[test.Port] {
+				result := &Results{
+					Name:        serverTest.Name,
+					Protocol:    serverTest.Protocol,
+					IsOpen:      false,
+					TestResults: make(map[string]*URLTestResult),
 				}
-			}
 
-			resultsChan <- struct {
-				name   string
-				result *Results
-			}{test.Name, result}
+				for url, urlResult := range urlResults {
+					resultCopy := *urlResult // Create a copy of the result
+					if urlResult.Success {
+						resultCopy.Success = validateProxyHeaders(serverTest, urlResult.Headers)
+						result.IsOpen = result.IsOpen || resultCopy.Success
+					}
+					result.TestResults[url] = &resultCopy
+				}
+
+				resultsChan <- struct {
+					name   string
+					result *Results
+				}{serverTest.Name, result}
+			}
 		}(test)
 	}
 
-	// Collect all results
-	for i := 0; i < len(scanner.config.ProxyTests); i++ {
+	expectedResults := 0
+	for _, tests := range serverTypes {
+		expectedResults += len(tests)
+	}
+
+	for i := 0; i < expectedResults; i++ {
 		res := <-resultsChan
 		results[res.name] = res.result
 	}
@@ -270,8 +268,7 @@ func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTest
 		return urlResult
 	}
 
-	req.Header.Set("User-Agent", "zgrab2/openproxy")
-	req.Header.Set("X-Test-Header", "true")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
 
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -289,16 +286,15 @@ func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTest
 		return urlResult
 	}
 
-	urlResult.Success = true
+	urlResult.Success = false
 	urlResult.StatusCode = resp.StatusCode
 	urlResult.ResponseTime = time.Since(start).String()
 	urlResult.ResponseSize = int64(len(body))
 	urlResult.Headers = resp.Header
 	urlResult.Body = body
 
-	if !validateProxyHeaders(test, resp.Header) {
+	if validateProxyHeaders(test, resp.Header) && resp.StatusCode == 200 {
 		urlResult.Success = true
-		urlResult.Error = "could not gaurantee proxy type; headers did not match fingerprint but got body"
 	}
 
 	return urlResult
@@ -313,7 +309,8 @@ func getHTTPClient(host string, test ProxyTest) (*http.Client, error) {
 
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxy),
+			Proxy:           http.ProxyURL(proxy),
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 		Timeout: time.Duration(5) * time.Second,
 	}, nil
