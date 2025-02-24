@@ -4,14 +4,23 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+	regexp "github.com/wasilibs/go-re2"
+
 	"github.com/zmap/zgrab2"
 	"golang.org/x/net/proxy"
+)
+
+var (
+	// Compile regex patterns once
+	apacheEtagRegex = regexp.MustCompile(`"?\d+-\d+-\d+"?`)
+	nginxEtagRegex  = regexp.MustCompile(`"?[a-f0-9]{32}:\d+\.\d+"?`)
+	iisEtagRegex    = regexp.MustCompile(`"[a-f0-9]+:[0-9]+"`)
 )
 
 // ProxyTest defines a proxy configuration to test
@@ -65,14 +74,26 @@ func RegisterModule() {
 }
 
 func (module *Module) NewFlags() interface{} {
+	uniqueTests := make(map[string]ProxyTest)
+
+	for _, tests := range serverTypes {
+		for _, test := range tests {
+			key := fmt.Sprintf("%d-%s", test.Port, test.Protocol)
+			uniqueTests[key] = ProxyTest{
+				Name:     test.Name, // Include name for better logging
+				Port:     test.Port,
+				Protocol: test.Protocol,
+			}
+		}
+	}
+
+	proxyTests := make([]ProxyTest, 0, len(uniqueTests))
+	for _, test := range uniqueTests {
+		proxyTests = append(proxyTests, test)
+	}
+
 	return &Flags{
-		ProxyTests: []ProxyTest{
-			{Port: 80, Protocol: "http"},
-			{Port: 443, Protocol: "https"},
-			{Port: 3128, Protocol: "http"},
-			{Port: 8118, Protocol: "http"},
-			{Port: 8388, Protocol: "socks5"},
-		},
+		ProxyTests: proxyTests,
 		TestURLs: []string{
 			"http://example.com",
 			"https://example.com",
@@ -87,6 +108,24 @@ var serverTypes = map[int][]ProxyTest{
 	3128: {{Name: "Squid", Port: 3128, Protocol: "http"}},
 	8118: {{Name: "Privoxy", Port: 8118, Protocol: "http"}},
 	8388: {{Name: "Shadowsocks", Port: 8388, Protocol: "socks5"}},
+}
+
+// TODO: wire up internal service checks
+var internalServiceChecks = []struct {
+	Name    string
+	Regex   *regexp.Regexp
+	URIPath string
+}{
+	{
+		Name:    "SSH",
+		Regex:   regexp.MustCompile(`(?i)SSH-\d+\.\d+-`),
+		URIPath: "http://127.0.0.1:22/",
+	},
+	{
+		Name:    "SMTP",
+		Regex:   regexp.MustCompile(`(?i)SMTP Postfix.*I can break rules, too\. Goodbye\.`),
+		URIPath: "http://127.0.0.1:25/",
+	},
 }
 
 // NewScanner provides a new scanner instance
@@ -139,17 +178,41 @@ func (scanner *Scanner) Init(flags zgrab2.ScanFlags) error {
 // validateProxyHeaders checks if response headers match expected proxy type
 func validateProxyHeaders(test ProxyTest, headers map[string][]string) bool {
 	server := headers["Server"]
-	if len(server) == 0 {
-		return false
+	if len(server) > 0 {
+		switch test.Name {
+		case "Apache HTTP", "Apache HTTPS":
+			if strings.HasPrefix(server[0], "Apache/") {
+				return true
+			}
+		case "Nginx HTTP", "Nginx HTTPS":
+			if strings.HasPrefix(server[0], "nginx/") {
+				return true
+			}
+		}
+	}
+
+	log.Infof("checking etag: %s", test.Name)
+	if etag := headers["Etag"]; len(etag) > 0 {
+		etagValue := etag[0]
+		switch test.Name {
+		case "Apache HTTP", "Apache HTTPS":
+			if apacheEtagRegex.MatchString(etagValue) {
+				log.Debugf("matched apache etag")
+				return true
+			}
+		case "Nginx HTTP", "Nginx HTTPS":
+			if nginxEtagRegex.MatchString(etagValue) {
+				log.Debugf("matched nginx etag")
+				return true
+			}
+		case "IIS":
+			if iisEtagRegex.MatchString(etagValue) {
+				return true
+			}
+		}
 	}
 
 	switch test.Name {
-	case "Apache HTTP", "Apache HTTPS":
-		return strings.HasPrefix(server[0], "Apache/")
-
-	case "Nginx HTTP", "Nginx HTTPS":
-		return strings.HasPrefix(server[0], "nginx/")
-
 	case "Squid":
 		via := headers["Via"]
 		xcache := headers["X-Cache"]
@@ -173,6 +236,7 @@ func validateProxyHeaders(test ProxyTest, headers map[string][]string) bool {
 		// SOCKS proxies don't modify headers
 		return true
 	}
+
 	return false
 }
 
@@ -187,6 +251,7 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 	}, len(scanner.config.ProxyTests))
 
 	for _, test := range scanner.config.ProxyTests {
+		log.Infof("starting test: %s %s %d", test.Name, test.Protocol, test.Port)
 		go func(test ProxyTest) {
 			var client *http.Client
 			var err error
@@ -228,8 +293,9 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 				}
 
 				for url, urlResult := range urlResults {
-					resultCopy := *urlResult // Create a copy of the result
+					resultCopy := *urlResult
 					if urlResult.Success {
+						log.Infof("url was successful, checking headers %s", serverTest.Name)
 						resultCopy.Success = validateProxyHeaders(serverTest, urlResult.Headers)
 						result.IsOpen = result.IsOpen || resultCopy.Success
 					}
@@ -259,6 +325,7 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 
 // Helper function to test a single URL
 func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTestResult {
+	log.Infof("testing url: %s %s %d", testURL, test.Name, test.Port)
 	urlResult := &URLTestResult{}
 
 	req, err := http.NewRequest("GET", testURL, nil)
