@@ -314,13 +314,18 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 				}
 
 				for url, urlResult := range urlResults {
-					resultCopy := *urlResult
-					if urlResult.Success {
-						matches := validateProxyHeaders(urlResult.Headers)
-						resultCopy.Success = matches[server.Name]
-						result.IsOpen = result.IsOpen || resultCopy.Success
+					matches := validateProxyHeaders(urlResult.Headers)
+					if matches[server.Name] {
+						resultCopy := *urlResult
+						resultCopy.Success = true
+						result.IsOpen = true
+						result.TestResults[url] = &resultCopy
+					} else if urlResult.Error != "" {
+						resultCopy := *urlResult
+						resultCopy.Success = false
+						result.TestResults[url] = &resultCopy
 					}
-					result.TestResults[url] = &resultCopy
+					// Don't include non-matching successful responses
 				}
 
 				resultsChan <- struct {
