@@ -176,57 +176,43 @@ func (scanner *Scanner) Init(flags zgrab2.ScanFlags) error {
 }
 
 // validateProxyHeaders checks if response headers match any known proxy types
-// Returns a map of server names to whether they matched
-func validateProxyHeaders(headers map[string][]string) map[string]bool {
-	matches := make(map[string]bool)
-
-	server := headers["Server"]
-	if len(server) > 0 {
+// Returns the name of the matched server, or empty string if no match
+func validateProxyHeaders(headers map[string][]string) string {
+	// Check Server header first as it's most reliable
+	if server := headers["Server"]; len(server) > 0 {
 		if strings.HasPrefix(server[0], "Apache/") {
-			matches["Apache HTTP"] = true
-			matches["Apache HTTPS"] = true
+			return "Apache HTTP"
 		}
 		if strings.HasPrefix(server[0], "nginx/") {
-			matches["Nginx HTTP"] = true
-			matches["Nginx HTTPS"] = true
+			return "Nginx HTTP"
 		}
 	}
 
+	// Check Via and X-Cache headers for Squid
+	via := headers["Via"]
+	xcache := headers["X-Cache"]
+	if (len(via) > 0 && strings.Contains(via[0], "squid")) ||
+		(len(xcache) > 0 && strings.Contains(xcache[0], "squid")) {
+		return "Squid"
+	}
+
+	// Check ETag patterns last as they're less definitive
 	if etag := headers["Etag"]; len(etag) > 0 {
 		etagValue := etag[0]
 		if apacheEtagRegex.MatchString(etagValue) {
-			matches["Apache HTTP"] = true
-			matches["Apache HTTPS"] = true
 			log.Debugf("matched apache etag")
+			return "Apache HTTP"
 		}
 		if nginxEtagRegex.MatchString(etagValue) {
-			matches["Nginx HTTP"] = true
-			matches["Nginx HTTPS"] = true
 			log.Debugf("matched nginx etag")
+			return "Nginx HTTP"
 		}
 		if iisEtagRegex.MatchString(etagValue) {
-			matches["IIS"] = true
+			return "IIS"
 		}
 	}
 
-	via := headers["Via"]
-	xcache := headers["X-Cache"]
-	if len(via) > 0 && strings.Contains(via[0], "squid") {
-		matches["Squid"] = true
-	}
-	if len(xcache) > 0 && strings.Contains(xcache[0], "squid") {
-		matches["Squid"] = true
-	}
-
-	// TODO: could result in false positives
-	// matches["HAProxy HTTP"] = true
-	// matches["HAProxy HTTPS"] = true
-	//
-	// matches["Privoxy"] = true
-	//
-	// matches["Shadowsocks"] = true
-	//
-	return matches
+	return "Unknown Server"
 }
 
 // Scan performs the openproxy scan
@@ -314,11 +300,11 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 				}
 
 				for url, urlResult := range urlResults {
-					matches := validateProxyHeaders(urlResult.Headers)
-					if matches[server.Name] {
+					matchedServer := validateProxyHeaders(urlResult.Headers)
+					if matchedServer != "" {
 						resultCopy := *urlResult
-						resultCopy.Success = true
-						result.IsOpen = true
+						resultCopy.Success = urlResult.Success
+						result.IsOpen = urlResult.Success
 						result.TestResults[url] = &resultCopy
 					} else if urlResult.Error != "" {
 						resultCopy := *urlResult
@@ -380,7 +366,7 @@ func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTest
 		return urlResult
 	}
 
-	urlResult.Success = resp.StatusCode == 200
+	urlResult.Success = resp.StatusCode == 200 || strings.Contains(string(body), "<title>Example Domain</title>")
 	urlResult.StatusCode = resp.StatusCode
 	urlResult.ResponseTime = time.Since(start).String()
 	urlResult.ResponseSize = int64(len(body))
