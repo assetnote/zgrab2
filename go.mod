@@ -1,6 +1,8 @@
 module github.com/zmap/zgrab2
 
-go 1.20
+go 1.22.0
+
+toolchain go1.23.3
 
 require (
 	github.com/hdm/jarm-go v0.0.7
@@ -11,7 +13,7 @@ require (
 	github.com/zmap/zflags v1.4.0-beta.1.0.20200204220219-9d95409821b6
 	golang.org/x/crypto v0.23.0
 	golang.org/x/net v0.25.0
-	golang.org/x/sys v0.20.0
+	golang.org/x/sys v0.29.0
 	golang.org/x/text v0.15.0
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
 	gopkg.in/mgo.v2 v2.0.0-20190816093944-a6b53ec6cb22
@@ -28,6 +30,9 @@ require (
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
+	github.com/tetratelabs/wazero v1.9.0 // indirect
+	github.com/wasilibs/go-re2 v1.9.0 // indirect
+	github.com/wasilibs/wazero-helpers v0.0.0-20240620070341-3dff1577cd52 // indirect
 	github.com/weppos/publicsuffix-go v0.30.0 // indirect
 	github.com/zmap/rc2 v0.0.0-20190804163417-abaa70531248 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
