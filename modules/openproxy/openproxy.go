@@ -212,6 +212,10 @@ func validateProxyHeaders(headers map[string][]string) string {
 		}
 	}
 
+	if server := headers["Server"]; len(server) > 0 {
+		return server[0]
+	}
+
 	return "Unknown Server"
 }
 
@@ -300,18 +304,21 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 				}
 
 				for url, urlResult := range urlResults {
-					matchedServer := validateProxyHeaders(urlResult.Headers)
-					if matchedServer != "" {
-						resultCopy := *urlResult
-						resultCopy.Success = urlResult.Success
-						result.IsOpen = urlResult.Success
-						result.TestResults[url] = &resultCopy
-					} else if urlResult.Error != "" {
-						resultCopy := *urlResult
-						resultCopy.Success = false
-						result.TestResults[url] = &resultCopy
+					testResult := *urlResult // Create a copy for this specific server type
+
+					if urlResult.Error != "" {
+						testResult.Success = false
+					} else {
+						matchedServer := validateProxyHeaders(urlResult.Headers)
+						if matchedServer != "" {
+							result.Name = matchedServer
+							result.IsOpen = urlResult.Success
+						} else {
+							continue // Skip non-matching responses
+						}
 					}
-					// Don't include non-matching successful responses
+
+					result.TestResults[url] = &testResult
 				}
 
 				resultsChan <- struct {
@@ -366,7 +373,7 @@ func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTest
 		return urlResult
 	}
 
-	urlResult.Success = resp.StatusCode == 200 || strings.Contains(string(body), "<title>Example Domain</title>")
+	urlResult.Success = strings.Contains(string(body), "<title>Example Domain</title>")
 	urlResult.StatusCode = resp.StatusCode
 	urlResult.ResponseTime = time.Since(start).String()
 	urlResult.ResponseSize = int64(len(body))
