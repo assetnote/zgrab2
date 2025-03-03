@@ -177,34 +177,65 @@ func (scanner *Scanner) Init(flags zgrab2.ScanFlags) error {
 
 // validateProxyHeaders checks if response headers match any known proxy types
 // Returns the name of the matched server, or empty string if no match
-func validateProxyHeaders(headers map[string][]string) string {
-	// Check Server header first as it's most reliable
+func validateProxyHeaders(headers map[string][]string, protocol string) string {
 	if server := headers["Server"]; len(server) > 0 {
-		if strings.HasPrefix(server[0], "Apache/") {
+		serverValue := strings.ToLower(server[0])
+
+		if strings.Contains(serverValue, "apache") {
+			if protocol == "https" {
+				return "Apache HTTPS"
+			}
 			return "Apache HTTP"
 		}
-		if strings.HasPrefix(server[0], "nginx/") {
+
+		if strings.Contains(serverValue, "nginx") {
+			if protocol == "https" {
+				return "Nginx HTTPS"
+			}
 			return "Nginx HTTP"
+		}
+
+		if strings.Contains(serverValue, "akamainetstorage") || strings.Contains(serverValue, "akamai") {
+			if protocol == "https" {
+				return "Akamai HTTPS"
+			}
+			return "Akamai HTTP"
+		}
+
+		if strings.Contains(serverValue, "cloudflare") {
+			return "Cloudflare"
+		}
+		if strings.Contains(serverValue, "squid") {
+			return "Squid"
+		}
+		if strings.Contains(serverValue, "privoxy") {
+			return "Privoxy"
 		}
 	}
 
-	// Check Via and X-Cache headers for Squid
 	via := headers["Via"]
 	xcache := headers["X-Cache"]
-	if (len(via) > 0 && strings.Contains(via[0], "squid")) ||
-		(len(xcache) > 0 && strings.Contains(xcache[0], "squid")) {
+	if (len(via) > 0 && strings.Contains(strings.ToLower(via[0]), "squid")) ||
+		(len(xcache) > 0 && strings.Contains(strings.ToLower(xcache[0]), "squid")) {
 		return "Squid"
 	}
 
-	// Check ETag patterns last as they're less definitive
 	if etag := headers["Etag"]; len(etag) > 0 {
 		etagValue := etag[0]
+		// Only check ETag if we haven't already identified the server from the Server header
+		// This prevents misidentification based on ETag patterns
 		if apacheEtagRegex.MatchString(etagValue) {
 			log.Debugf("matched apache etag")
+			if protocol == "https" {
+				return "Apache HTTPS"
+			}
 			return "Apache HTTP"
 		}
 		if nginxEtagRegex.MatchString(etagValue) {
 			log.Debugf("matched nginx etag")
+			if protocol == "https" {
+				return "Nginx HTTPS"
+			}
 			return "Nginx HTTP"
 		}
 		if iisEtagRegex.MatchString(etagValue) {
@@ -212,11 +243,7 @@ func validateProxyHeaders(headers map[string][]string) string {
 		}
 	}
 
-	if server := headers["Server"]; len(server) > 0 {
-		return server[0]
-	}
-
-	return "Unknown Server"
+	return "" // Return empty string if no match
 }
 
 // Scan performs the openproxy scan
@@ -224,14 +251,12 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 	results := make(map[string]*Results)
 	targetHost := target.String()
 
-	// Group tests by port/protocol to avoid duplicate requests
 	portTests := make(map[string]struct {
 		port     int
 		protocol string
 		servers  []ProxyTest
 	})
 
-	// Group server types by port/protocol
 	for port, tests := range serverTypes {
 		for _, test := range tests {
 			key := fmt.Sprintf("%d-%s", port, test.Protocol)
@@ -255,15 +280,13 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 	resultsChan := make(chan struct {
 		name   string
 		result *Results
-	}, len(serverTypes))
+	}, len(portTests)) // Changed from len(serverTypes) to len(portTests)
 
-	// Test each unique port/protocol combination once
 	for _, group := range portTests {
 		go func(port int, protocol string, servers []ProxyTest) {
 			var client *http.Client
 			var err error
 
-			// Create client for this port/protocol
 			switch protocol {
 			case "http", "https":
 				client, err = getHTTPClient(targetHost, ProxyTest{Port: port, Protocol: protocol})
@@ -272,72 +295,95 @@ func (scanner *Scanner) Scan(target zgrab2.ScanTarget) (zgrab2.ScanStatus, inter
 			}
 
 			if err != nil {
-				// Handle error for all servers in this group
-				for _, server := range servers {
+				// add error results
+				if len(servers) > 0 {
+					server := servers[0]
 					result := &Results{
 						Name:        server.Name,
 						Protocol:    server.Protocol,
 						IsOpen:      false,
 						TestResults: make(map[string]*URLTestResult),
 					}
+
+					for _, testURL := range scanner.config.TestURLs {
+						result.TestResults[testURL] = &URLTestResult{
+							Success: false,
+							Error:   err.Error(),
+						}
+					}
+
 					resultsChan <- struct {
 						name   string
 						result *Results
-					}{server.Name, result}
+					}{fmt.Sprintf("%d-%s", port, protocol), result}
 				}
 				return
 			}
 
-			// Make requests once for this port/protocol
 			urlResults := make(map[string]*URLTestResult)
 			for _, testURL := range scanner.config.TestURLs {
 				urlResults[testURL] = testSingleURL(client, testURL, ProxyTest{Port: port, Protocol: protocol})
 			}
 
-			// Check results against each potential server type
-			for _, server := range servers {
-				result := &Results{
-					Name:        server.Name,
-					Protocol:    server.Protocol,
-					IsOpen:      false,
-					TestResults: make(map[string]*URLTestResult),
+			detectedServerType := ""
+			for _, urlResult := range urlResults {
+				if urlResult.Error == "" && len(urlResult.Headers) > 0 {
+					detectedType := validateProxyHeaders(urlResult.Headers, protocol)
+					if detectedType != "" {
+						detectedServerType = detectedType
+						break
+					}
+				}
+			}
+
+			result := &Results{
+				Name:        "", // Will be set based on detection
+				Protocol:    protocol,
+				IsOpen:      false,
+				TestResults: urlResults,
+			}
+
+			// if we detected a specific server type, use that name
+			if detectedServerType != "" {
+				result.Name = detectedServerType
+
+				// check if any test was successful
+				for _, urlResult := range urlResults {
+					if urlResult.Success {
+						result.IsOpen = true
+						break
+					}
+				}
+			} else {
+				// if no server type detected, use the first server type in the list
+				if len(servers) > 0 {
+					result.Name = servers[0].Name
 				}
 
-				for url, urlResult := range urlResults {
-					testResult := *urlResult // Create a copy for this specific server type
-
-					if urlResult.Error != "" {
-						testResult.Success = false
-					} else {
-						matchedServer := validateProxyHeaders(urlResult.Headers)
-						if matchedServer != "" {
-							result.Name = matchedServer
-							result.IsOpen = urlResult.Success
-						} else {
-							continue // Skip non-matching responses
+				// for non-HTTP server types, check if any test was successful
+				if protocol == "socks5" {
+					for _, urlResult := range urlResults {
+						if urlResult.Success {
+							result.IsOpen = true
+							break
 						}
 					}
-
-					result.TestResults[url] = &testResult
 				}
-
-				resultsChan <- struct {
-					name   string
-					result *Results
-				}{server.Name, result}
 			}
+
+			// send a single result for this port/protocol combination
+			resultsChan <- struct {
+				name   string
+				result *Results
+			}{result.Name, result}
 		}(group.port, group.protocol, group.servers)
 	}
 
-	// Collect results
-	expectedResults := 0
-	for _, tests := range serverTypes {
-		expectedResults += len(tests)
-	}
-
-	for i := 0; i < expectedResults; i++ {
+	for i := 0; i < len(portTests); i++ {
 		res := <-resultsChan
-		results[res.name] = res.result
+		if res.name != "" {
+			results[res.name] = res.result
+		}
 	}
 
 	return zgrab2.SCAN_SUCCESS, results, nil
@@ -373,7 +419,11 @@ func testSingleURL(client *http.Client, testURL string, test ProxyTest) *URLTest
 		return urlResult
 	}
 
+	// Determine if the proxy is open by checking for the expected content
+	// A successful proxy connection should return the expected content from example.com
+	// If the response contains the expected title, it's considered open regardless of status code
 	urlResult.Success = strings.Contains(string(body), "<title>Example Domain</title>")
+
 	urlResult.StatusCode = resp.StatusCode
 	urlResult.ResponseTime = time.Since(start).String()
 	urlResult.ResponseSize = int64(len(body))
